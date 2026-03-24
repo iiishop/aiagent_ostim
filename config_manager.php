@@ -1494,6 +1494,7 @@ SQL;
             <div class="button-group">
                 <button class="btn-primary" onclick="createScene()">创建场景</button>
                 <button class="btn-secondary" onclick="clearSceneForm()">清空表单</button>
+                <button class="btn-secondary" onclick="generateCurrentSceneDescription()">生成当前描述</button>
                 <button class="btn-warning" onclick="generateSceneDescriptions()" title='Will Use AI'>($) 从内部描述生成文案</button>
             </div>
 
@@ -2176,6 +2177,38 @@ SQL;
         }
 
         // Generate Scene Descriptions
+        function generateCurrentSceneDescription() {
+            const iDesc = document.getElementById('sceneIDesc').value.trim();
+            if (!iDesc) {
+                showAlert('sceneErrorAlert', '请先填写内部描述', 'error');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('mode', 'single');
+            formData.append('i_desc', iDesc);
+
+            showProcessing();
+            fetch('<?php echo dirname($_SERVER['PHP_SELF']); ?>/cmd/gen_scene_desc.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                hideProcessing();
+                if (data.success) {
+                    document.getElementById('sceneDesc').value = data.description || '';
+                    showAlert('sceneSuccessAlert', '已基于当前内部描述生成默认描述。', 'success');
+                } else {
+                    showAlert('sceneErrorAlert', '错误: ' + (data.error || '未知错误'), 'error');
+                }
+            })
+            .catch(error => {
+                hideProcessing();
+                showAlert('sceneErrorAlert', '网络错误: ' + error.message, 'error');
+            });
+        }
+
         function generateSceneDescriptions() {
             if (!confirm('从内部描述生成文案？这将向服务器发起请求。')) {
                 return;
@@ -2189,11 +2222,13 @@ SQL;
             .then(data => {
                 hideProcessing();
                 if (data.success) {
-                    showAlert('sceneSuccessAlert', '文案生成成功', 'success');
-                    // Reload the page after a short delay
-                    setTimeout(() => {
-                        location.reload();
-                    }, 1500);
+                    const processed = Number(data.processed || 0);
+                    if (processed > 0) {
+                        showAlert('sceneSuccessAlert', '文案生成成功，已处理 ' + processed + ' 条记录。', 'success');
+                    } else {
+                        showAlert('sceneSuccessAlert', '未处理任何记录。仅会处理 description 为空且 i_desc 不为空的场景。', 'success');
+                    }
+                    loadScenes();
                 } else {
                     showAlert('sceneErrorAlert', '错误: ' + (data.error || '未知错误'), 'error');
                 }

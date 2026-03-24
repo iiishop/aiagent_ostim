@@ -173,6 +173,20 @@ En este universo, la gente es ruda y suele usar lenguaje vulgar.",
     return trim($textResponse);
 }
 
+$mode = $_POST['mode'] ?? 'batch';
+if ($mode === 'single') {
+    $input = trim((string)($_POST['i_desc'] ?? ''));
+    if ($input === '') {
+        die(json_encode(["success" => false, "error" => "i_desc is required"]));
+    }
+
+    $generated = requestDescriptionFromNatural($input);
+    die(json_encode([
+        "success" => true,
+        "description" => $generated,
+    ]));
+}
+
 $db=new sql();
 $all=$db->fetchAll("SELECT * FROM public.ext_aiagentnsfw_scenes where (description is null or description='') and i_desc is not null");
 
