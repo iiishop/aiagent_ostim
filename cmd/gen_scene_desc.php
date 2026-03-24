@@ -3,7 +3,10 @@
 $method = $_SERVER['REQUEST_METHOD'];
 
 if ($method === 'POST') {
+header('Content-Type: application/json; charset=utf-8');
     $jsonDataInput = $_POST;
+
+try {
 
 $enginePath = realpath(__DIR__ . DIRECTORY_SEPARATOR . ".." . DIRECTORY_SEPARATOR . ".." . DIRECTORY_SEPARATOR . ".." . DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
 require_once($enginePath . "conf".DIRECTORY_SEPARATOR."conf.php");
@@ -176,10 +179,8 @@ $all=$db->fetchAll("SELECT * FROM public.ext_aiagentnsfw_scenes where (descripti
 shuffle($all);
 $n=0;
 foreach ($all as $single) {
-    echo $single["description"];
     //$trl=requestTranslations($single["description"]);
     $trl=requestDescriptionFromNatural($single["i_desc"]);
-    echo PHP_EOL.$trl.PHP_EOL;
     // update($table, $set, $where = "FALSE")
     $rowData=$db->escape($trl);
     $id=$db->escape($single["stage"]);
@@ -188,6 +189,11 @@ foreach ($all as $single) {
     $n++;
 }
 
-die(json_encode(["succes"=>true]));
+die(json_encode(["success"=>true, "processed"=>$n]));
+
+} catch (Throwable $e) {
+    http_response_code(500);
+    die(json_encode(["success" => false, "error" => $e->getMessage()]));
+}
 
 }
