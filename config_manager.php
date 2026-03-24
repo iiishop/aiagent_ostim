@@ -50,6 +50,14 @@
         handleLoadSettings();
     } elseif ($action === 'saveSettings') {
         handleSaveSettings();
+    } elseif ($action === 'listSceneReports') {
+        handleListSceneReports();
+    } elseif ($action === 'getSceneReportDetail') {
+        handleGetSceneReportDetail();
+    } elseif ($action === 'deleteSceneReport') {
+        handleDeleteSceneReport();
+    } elseif ($action === 'clearSceneReports') {
+        handleClearSceneReports();
     } elseif ($action === 'generateTable') {
         handleGenerateTable();
     } elseif ($action === 'importData') {
@@ -631,6 +639,153 @@ SQL;
             echo json_encode([
                 'success' => true,
                 'message' => '设置已保存',
+            ]);
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
+        }
+        exit;
+    }
+
+    function loadSceneReportsRaw()
+    {
+        $row = $GLOBALS["db"]->fetchOne("SELECT value FROM conf_opts WHERE id='AIAGENT_NSFW_SCENE_REPORTS'");
+        if (!is_array($row) || !isset($row['value']) || trim((string)$row['value']) === '') {
+            return [];
+        }
+        $decoded = json_decode($row['value'], true);
+        if (!is_array($decoded)) {
+            return [];
+        }
+        return array_values($decoded);
+    }
+
+    function handleListSceneReports()
+    {
+        try {
+            $reports = loadSceneReportsRaw();
+            $list = [];
+            foreach ($reports as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $list[] = [
+                    'id' => $item['id'] ?? '',
+                    'session_id' => $item['session_id'] ?? '',
+                    'started_gamets' => $item['started_gamets'] ?? '',
+                    'ended_gamets' => $item['ended_gamets'] ?? '',
+                    'started_unix' => $item['started_unix'] ?? 0,
+                    'ended_unix' => $item['ended_unix'] ?? 0,
+                    'player_name' => $item['player_name'] ?? '',
+                    'participants' => $item['participants'] ?? [],
+                    'participants_count' => $item['participants_count'] ?? 0,
+                    'stage_count' => $item['stage_count'] ?? 0,
+                    'dialogue_count' => $item['dialogue_count'] ?? 0,
+                ];
+            }
+
+            echo json_encode([
+                'success' => true,
+                'data' => $list,
+            ]);
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
+        }
+        exit;
+    }
+
+    function handleGetSceneReportDetail()
+    {
+        try {
+            $id = trim($_GET['id'] ?? '');
+            if ($id === '') {
+                throw new Exception('id is required');
+            }
+
+            $reports = loadSceneReportsRaw();
+            $found = null;
+            foreach ($reports as $item) {
+                if (is_array($item) && (string)($item['id'] ?? '') === $id) {
+                    $found = $item;
+                    break;
+                }
+            }
+
+            if (!$found) {
+                throw new Exception('report not found');
+            }
+
+            echo json_encode([
+                'success' => true,
+                'data' => $found,
+            ]);
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
+        }
+        exit;
+    }
+
+    function handleDeleteSceneReport()
+    {
+        try {
+            $id = trim($_POST['id'] ?? '');
+            if ($id === '') {
+                throw new Exception('id is required');
+            }
+
+            $reports = loadSceneReportsRaw();
+            $before = count($reports);
+            $filtered = array_values(array_filter($reports, function ($item) use ($id) {
+                return !is_array($item) || (string)($item['id'] ?? '') !== $id;
+            }));
+
+            if (count($filtered) === $before) {
+                throw new Exception('report not found');
+            }
+
+            $safe = $GLOBALS["db"]->escape(json_encode($filtered, JSON_UNESCAPED_UNICODE));
+            $exists = $GLOBALS["db"]->fetchOne("SELECT id FROM conf_opts WHERE id='AIAGENT_NSFW_SCENE_REPORTS'");
+            if ($exists) {
+                $GLOBALS["db"]->update('conf_opts', "value='{$safe}'", "id='AIAGENT_NSFW_SCENE_REPORTS'");
+            } else {
+                $GLOBALS["db"]->insert('conf_opts', ['id' => 'AIAGENT_NSFW_SCENE_REPORTS', 'value' => json_encode($filtered, JSON_UNESCAPED_UNICODE)]);
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => '记录已删除',
+            ]);
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ]);
+        }
+        exit;
+    }
+
+    function handleClearSceneReports()
+    {
+        try {
+            $safe = $GLOBALS["db"]->escape('[]');
+            $exists = $GLOBALS["db"]->fetchOne("SELECT id FROM conf_opts WHERE id='AIAGENT_NSFW_SCENE_REPORTS'");
+            if ($exists) {
+                $GLOBALS["db"]->update('conf_opts', "value='{$safe}'", "id='AIAGENT_NSFW_SCENE_REPORTS'");
+            } else {
+                $GLOBALS["db"]->insert('conf_opts', ['id' => 'AIAGENT_NSFW_SCENE_REPORTS', 'value' => '[]']);
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => '记录已清空',
             ]);
         } catch (Exception $e) {
             echo json_encode([
@@ -1306,6 +1461,83 @@ SQL;
             overflow: auto;
         }
 
+        .report-table-wrap {
+            border: 1px solid #c9b48d;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #fff;
+            margin-top: 8px;
+        }
+
+        .report-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .report-table th,
+        .report-table td {
+            padding: 8px;
+            border-bottom: 1px solid #ebe2d3;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .report-table th {
+            background: #f3e9d8;
+            color: #2f4435;
+            font-weight: 700;
+        }
+
+        .report-table tr:hover {
+            background: #fcf6ea;
+        }
+
+        .pill {
+            display: inline-block;
+            border-radius: 999px;
+            border: 1px solid #cdb995;
+            background: #f6efdf;
+            color: #324334;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 8px;
+        }
+
+        .empty-line {
+            padding: 10px;
+            color: #6b7461;
+            font-size: 12px;
+        }
+
+        .timeline-list,
+        .dialogue-list {
+            max-height: 280px;
+            overflow: auto;
+            border: 1px solid #d8c6a7;
+            border-radius: 8px;
+            background: #fffdf8;
+            padding: 8px;
+            margin-top: 8px;
+        }
+
+        .timeline-item,
+        .dialogue-item {
+            border-bottom: 1px dashed #e3d7c1;
+            padding: 6px 2px;
+            font-size: 12px;
+        }
+
+        .timeline-item:last-child,
+        .dialogue-item:last-child {
+            border-bottom: none;
+        }
+
+        .mini-muted {
+            color: #6a725f;
+            font-size: 11px;
+        }
+
         .level-guide {
             display: grid;
             grid-template-columns: 1fr;
@@ -1932,6 +2164,30 @@ SQL;
                     </div>
                 </div>
             </div>
+
+            <div class="panel" style="margin-top: 14px;">
+                <div class="panel-title">玩家 OStim 场景记录</div>
+                <div class="button-group" style="margin-bottom: 8px;">
+                    <button class="btn-secondary" onclick="loadSceneReportsList()">刷新记录</button>
+                    <button class="btn-danger" onclick="clearSceneReports()">清空全部</button>
+                </div>
+                <div class="report-table-wrap">
+                    <table class="report-table">
+                        <thead>
+                            <tr>
+                                <th>开始时间</th>
+                                <th>参与者（不含玩家）</th>
+                                <th>动画数</th>
+                                <th>对话数</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sceneReportsTableBody">
+                            <tr><td colspan="5" class="empty-line">暂无记录</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- Settings Tab -->
@@ -2127,6 +2383,23 @@ SQL;
         </div>
     </div>
 
+    <div id="sceneReportModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 1100;">
+        <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 20px; border-radius: 10px; width: 95%; max-width: 980px; max-height: 90vh; overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3);">
+            <h2 style="margin-bottom: 10px; color: #333;">场景记录详情</h2>
+            <div id="sceneReportMeta" class="mini-muted"></div>
+
+            <h3 style="margin: 14px 0 6px; color: #35503d;">动画切换过程</h3>
+            <div id="sceneReportTimeline" class="timeline-list"></div>
+
+            <h3 style="margin: 14px 0 6px; color: #35503d;">场景对话时间线</h3>
+            <div id="sceneReportDialogue" class="dialogue-list"></div>
+
+            <div class="button-group" style="margin-top: 12px;">
+                <button class="btn-secondary" onclick="closeSceneReportModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Pagination variables
         let allScenes = [];
@@ -2136,6 +2409,7 @@ SQL;
         let stageCaptureBaseline = new Set();
         let stageCaptureTimer = null;
         let highlightedStages = new Set();
+        let sceneReportsCache = [];
 
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
@@ -2143,6 +2417,7 @@ SQL;
             loadNPCSelector();
             loadConnectorSelector();
             loadSettings();
+            loadSceneReportsList();
         });
 
         // Tab switching
@@ -2579,9 +2854,13 @@ SQL;
 
         // Close modal when clicking outside
         document.addEventListener('click', function(event) {
-            const modal = document.getElementById('editModal');
-            if (event.target === modal) {
+            const editModal = document.getElementById('editModal');
+            const reportModal = document.getElementById('sceneReportModal');
+            if (event.target === editModal) {
                 closeEditModal();
+            }
+            if (event.target === reportModal) {
+                closeSceneReportModal();
             }
         });
 
@@ -2890,6 +3169,196 @@ SQL;
                 .catch(error => {
                     showAlert('toolsErrorAlert', '网络错误: ' + error.message, 'error');
                 });
+        }
+
+        function formatUnixTime(ts) {
+            const n = Number(ts || 0);
+            if (!n) {
+                return '-';
+            }
+            const d = new Date(n * 1000);
+            if (isNaN(d.getTime())) {
+                return '-';
+            }
+            return d.toLocaleString();
+        }
+
+        function loadSceneReportsList() {
+            fetch('<?php echo $_SERVER['PHP_SELF']; ?>?action=listSceneReports')
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        showAlert('toolsErrorAlert', '加载场景记录失败: ' + (data.error || '未知错误'), 'error');
+                        return;
+                    }
+                    sceneReportsCache = Array.isArray(data.data) ? data.data : [];
+                    renderSceneReportsList(sceneReportsCache);
+                })
+                .catch(error => {
+                    showAlert('toolsErrorAlert', '网络错误: ' + error.message, 'error');
+                });
+        }
+
+        function renderSceneReportsList(reports) {
+            const tbody = document.getElementById('sceneReportsTableBody');
+            if (!tbody) {
+                return;
+            }
+
+            if (!Array.isArray(reports) || reports.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-line">暂无记录</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = '';
+            reports.forEach(item => {
+                const tr = document.createElement('tr');
+                const participants = Array.isArray(item.participants) ? item.participants : [];
+                tr.innerHTML = '' +
+                    '<td>' + escapeHtml(formatUnixTime(item.started_unix)) + '</td>' +
+                    '<td>' + (participants.length ? participants.map(x => '<span class="pill">' + escapeHtml(String(x)) + '</span>').join(' ') : '<span class="mini-muted">(无)</span>') + '</td>' +
+                    '<td>' + escapeHtml(String(item.stage_count || 0)) + '</td>' +
+                    '<td>' + escapeHtml(String(item.dialogue_count || 0)) + '</td>' +
+                    '<td>' +
+                        '<div class="action-buttons">' +
+                            '<button class="btn-secondary" onclick="openSceneReportDetail(\'' + escapeAttr(item.id || '') + '\')">查看详情</button>' +
+                            '<button class="btn-danger" onclick="deleteSceneReport(\'' + escapeAttr(item.id || '') + '\')">删除</button>' +
+                        '</div>' +
+                    '</td>';
+                tbody.appendChild(tr);
+            });
+        }
+
+        function deleteSceneReport(id) {
+            if (!id) {
+                return;
+            }
+            if (!confirm('确定要删除这条场景记录吗？')) {
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('id', id);
+
+            fetch('<?php echo $_SERVER['PHP_SELF']; ?>?action=deleteSceneReport', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        showAlert('toolsErrorAlert', '删除记录失败: ' + (data.error || '未知错误'), 'error');
+                        return;
+                    }
+                    closeSceneReportModal();
+                    showAlert('toolsSuccessAlert', data.message || '记录已删除', 'success');
+                    loadSceneReportsList();
+                })
+                .catch(error => {
+                    showAlert('toolsErrorAlert', '网络错误: ' + error.message, 'error');
+                });
+        }
+
+        function clearSceneReports() {
+            if (!confirm('确定要清空全部场景记录吗？此操作不可恢复。')) {
+                return;
+            }
+
+            fetch('<?php echo $_SERVER['PHP_SELF']; ?>?action=clearSceneReports', {
+                method: 'POST'
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        showAlert('toolsErrorAlert', '清空记录失败: ' + (data.error || '未知错误'), 'error');
+                        return;
+                    }
+                    closeSceneReportModal();
+                    sceneReportsCache = [];
+                    renderSceneReportsList(sceneReportsCache);
+                    showAlert('toolsSuccessAlert', data.message || '记录已清空', 'success');
+                })
+                .catch(error => {
+                    showAlert('toolsErrorAlert', '网络错误: ' + error.message, 'error');
+                });
+        }
+
+        function openSceneReportDetail(id) {
+            if (!id) {
+                return;
+            }
+
+            fetch('<?php echo $_SERVER['PHP_SELF']; ?>?action=getSceneReportDetail&id=' + encodeURIComponent(id))
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        showAlert('toolsErrorAlert', '加载详情失败: ' + (data.error || '未知错误'), 'error');
+                        return;
+                    }
+                    renderSceneReportDetail(data.data || {});
+                    document.getElementById('sceneReportModal').style.display = 'block';
+                })
+                .catch(error => {
+                    showAlert('toolsErrorAlert', '网络错误: ' + error.message, 'error');
+                });
+        }
+
+        function renderSceneReportDetail(report) {
+            const meta = document.getElementById('sceneReportMeta');
+            const timeline = document.getElementById('sceneReportTimeline');
+            const dialogue = document.getElementById('sceneReportDialogue');
+            if (!meta || !timeline || !dialogue) {
+                return;
+            }
+
+            const participants = Array.isArray(report.participants) ? report.participants : [];
+            meta.innerHTML = '' +
+                '<div>开始: ' + escapeHtml(formatUnixTime(report.started_unix)) + ' | 结束: ' + escapeHtml(formatUnixTime(report.ended_unix)) + '</div>' +
+                '<div>参与者（不含玩家）: ' + escapeHtml(participants.join(', ') || '(无)') + '</div>' +
+                '<div>动画数: ' + escapeHtml(String(report.stage_count || 0)) + '，对话数: ' + escapeHtml(String(report.dialogue_count || 0)) + '</div>';
+
+            const stages = Array.isArray(report.stages) ? report.stages : [];
+            if (stages.length === 0) {
+                timeline.innerHTML = '<div class="empty-line">无动画记录</div>';
+            } else {
+                timeline.innerHTML = stages.map((s, i) => {
+                    const stage = String(s.stage || '');
+                    const desc = String(s.description || '');
+                    const descType = s.has_db_description ? 'db_desc' : 'fallback_desc';
+                    const tags = Array.isArray(s.tags) ? s.tags.join(',') : '';
+                    return '' +
+                        '<div class="timeline-item">' +
+                            '<div><strong>' + escapeHtml(String(i + 1) + '. ' + stage) + '</strong></div>' +
+                            '<div class="mini-muted">' + escapeHtml(descType + (tags ? (' | tags=' + tags) : '')) + '</div>' +
+                            '<div>' + escapeHtml(desc || '-') + '</div>' +
+                        '</div>';
+                }).join('');
+            }
+
+            const lines = Array.isArray(report.dialogue) ? report.dialogue : [];
+            if (lines.length === 0) {
+                dialogue.innerHTML = '<div class="empty-line">无对话记录</div>';
+            } else {
+                dialogue.innerHTML = lines.map((line, i) => {
+                    const t = String(line.sk_date || '');
+                    const speaker = String(line.speaker || '');
+                    const listener = String(line.listener || '');
+                    const speech = String(line.speech || '');
+                    return '' +
+                        '<div class="dialogue-item">' +
+                            '<div class="mini-muted">' + escapeHtml(String(i + 1) + '. ' + (t || '-')) + '</div>' +
+                            '<div><strong>' + escapeHtml(speaker) + '</strong> ' + (listener ? ('-> <strong>' + escapeHtml(listener) + '</strong>') : '') + '</div>' +
+                            '<div>' + escapeHtml(speech || '-') + '</div>' +
+                        '</div>';
+                }).join('');
+            }
+        }
+
+        function closeSceneReportModal() {
+            const modal = document.getElementById('sceneReportModal');
+            if (modal) {
+                modal.style.display = 'none';
+            }
         }
 
         function setCaptureStatus(text, active = false) {

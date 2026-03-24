@@ -2,6 +2,519 @@
 
 require_once __DIR__ . "/../../lib/chat_helper_functions.php";
 
+function aiagentNsfwSceneTrackerDefault()
+{
+    return [
+        "active" => false,
+        "session_id" => "",
+        "started_gamets" => "",
+        "started_unix" => 0,
+        "player_name" => "",
+        "actors" => [],
+        "participants" => [],
+        "stage_history" => [],
+        "journal_baseline" => [],
+        "journal_window" => 1200,
+        "journal_floor_sk_date" => "",
+    ];
+}
+
+function aiagentNsfwGetConfValue($id)
+{
+    $safeId = $GLOBALS["db"]->escape($id);
+    $row = $GLOBALS["db"]->fetchOne("SELECT value FROM conf_opts WHERE id='{$safeId}'");
+    if (!is_array($row) || !array_key_exists("value", $row)) {
+        return null;
+    }
+    return $row["value"];
+}
+
+function aiagentNsfwSetConfValue($id, $value)
+{
+    $safeId = $GLOBALS["db"]->escape($id);
+    $safeValue = $GLOBALS["db"]->escape($value);
+    $exists = $GLOBALS["db"]->fetchOne("SELECT id FROM conf_opts WHERE id='{$safeId}'");
+    if ($exists) {
+        $GLOBALS["db"]->update("conf_opts", "value='{$safeValue}'", "id='{$safeId}'");
+    } else {
+        $GLOBALS["db"]->insert("conf_opts", ["id" => $id, "value" => $value]);
+    }
+}
+
+function aiagentNsfwLoadSceneTracker()
+{
+    $raw = aiagentNsfwGetConfValue("AIAGENT_NSFW_PLAYER_SCENE_TRACKER");
+    if (empty($raw)) {
+        return aiagentNsfwSceneTrackerDefault();
+    }
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return aiagentNsfwSceneTrackerDefault();
+    }
+    return array_merge(aiagentNsfwSceneTrackerDefault(), $decoded);
+}
+
+function aiagentNsfwSaveSceneTracker(array $state)
+{
+    aiagentNsfwSetConfValue("AIAGENT_NSFW_PLAYER_SCENE_TRACKER", json_encode($state, JSON_UNESCAPED_UNICODE));
+}
+
+function aiagentNsfwLoadSceneReports()
+{
+    $raw = aiagentNsfwGetConfValue("AIAGENT_NSFW_SCENE_REPORTS");
+    if (empty($raw)) {
+        return [];
+    }
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    return array_values($decoded);
+}
+
+function aiagentNsfwSaveSceneReports(array $reports)
+{
+    aiagentNsfwSetConfValue("AIAGENT_NSFW_SCENE_REPORTS", json_encode(array_values($reports), JSON_UNESCAPED_UNICODE));
+}
+
+function aiagentNsfwAppendSceneReport(array $report)
+{
+    $reports = aiagentNsfwLoadSceneReports();
+    array_unshift($reports, $report);
+    $maxKeep = 120;
+    if (count($reports) > $maxKeep) {
+        $reports = array_slice($reports, 0, $maxKeep);
+    }
+    aiagentNsfwSaveSceneReports($reports);
+}
+
+function aiagentNsfwUniqueNames(array $names)
+{
+    $out = [];
+    foreach ($names as $name) {
+        $name = trim((string)$name);
+        if ($name === "") {
+            continue;
+        }
+        if (!in_array($name, $out, true)) {
+            $out[] = $name;
+        }
+    }
+    return $out;
+}
+
+function aiagentNsfwNormalizeName($name)
+{
+    $name = strtolower(trim((string)$name));
+    $name = preg_replace('/\s+/', '', $name);
+    $name = preg_replace('/[^a-z0-9_\-]/', '', $name);
+    return $name;
+}
+
+function aiagentNsfwNameLooksLikePlayer($actorName, $playerName)
+{
+    $actorRaw = strtolower(trim((string)$actorName));
+    $playerRaw = strtolower(trim((string)$playerName));
+    if ($actorRaw === '' || $playerRaw === '') {
+        return false;
+    }
+
+    if ($actorRaw === $playerRaw) {
+        return true;
+    }
+
+    $actorNorm = aiagentNsfwNormalizeName($actorRaw);
+    $playerNorm = aiagentNsfwNormalizeName($playerRaw);
+    if ($actorNorm !== '' && $actorNorm === $playerNorm) {
+        return true;
+    }
+
+    if ($playerNorm !== '' && strpos($actorNorm, $playerNorm) !== false) {
+        return true;
+    }
+
+    if ($actorNorm === 'player' || $actorNorm === 'theplayer') {
+        return true;
+    }
+
+    return false;
+}
+
+function aiagentNsfwHashJournalRow(array $row)
+{
+    $speaker = trim((string)($row["speaker"] ?? ""));
+    $listener = trim((string)($row["listener"] ?? ""));
+    $speech = trim((string)($row["speech"] ?? ""));
+    $date = trim((string)($row["sk_date"] ?? ""));
+    return md5($speaker . "|" . $listener . "|" . $speech . "|" . $date);
+}
+
+function aiagentNsfwCompareSkDate($a, $b)
+{
+    $a = trim((string)$a);
+    $b = trim((string)$b);
+    if ($a === $b) {
+        return 0;
+    }
+    if ($a === "") {
+        return -1;
+    }
+    if ($b === "") {
+        return 1;
+    }
+
+    $aTs = strtotime($a);
+    $bTs = strtotime($b);
+    if ($aTs !== false && $bTs !== false) {
+        return $aTs <=> $bTs;
+    }
+
+    return strcmp($a, $b);
+}
+
+function aiagentNsfwIsAfterSkDate($candidate, $floor)
+{
+    $floor = trim((string)$floor);
+    if ($floor === "") {
+        return true;
+    }
+    return aiagentNsfwCompareSkDate($candidate, $floor) > 0;
+}
+
+function aiagentNsfwCaptureSpeechBaseline(array $actors, $historyLimit = 1200)
+{
+    $baseline = [];
+    if (!function_exists("DataSpeechJournal")) {
+        return $baseline;
+    }
+
+    foreach (aiagentNsfwUniqueNames($actors) as $actor) {
+        $rows = json_decode(DataSpeechJournal($actor, $historyLimit), true);
+        if (!is_array($rows)) {
+            $baseline[$actor] = [];
+            continue;
+        }
+        $hashes = [];
+        $lastSkDate = "";
+        foreach ($rows as $row) {
+            if (is_array($row)) {
+                $hashes[] = aiagentNsfwHashJournalRow($row);
+                $curSkDate = trim((string)($row["sk_date"] ?? ""));
+                if ($curSkDate !== "" && aiagentNsfwCompareSkDate($curSkDate, $lastSkDate) > 0) {
+                    $lastSkDate = $curSkDate;
+                }
+            }
+        }
+        $baseline[$actor] = [
+            "hashes" => array_values(array_unique($hashes)),
+            "last_sk_date" => $lastSkDate,
+        ];
+    }
+
+    return $baseline;
+}
+
+function aiagentNsfwCollectSceneDialogue(array $actors, array $baseline, $historyLimit = 1200)
+{
+    $lines = [];
+    if (!function_exists("DataSpeechJournal")) {
+        return $lines;
+    }
+
+    $actors = aiagentNsfwUniqueNames($actors);
+    $allowedSpeaker = array_flip($actors);
+    $seq = 0;
+
+    foreach ($actors as $actor) {
+        $rows = json_decode(DataSpeechJournal($actor, $historyLimit), true);
+        if (!is_array($rows)) {
+            continue;
+        }
+
+        $baselineSet = [];
+        $baselineEntry = $baseline[$actor] ?? [];
+        $baselineHashes = [];
+        $baselineSkDate = "";
+
+        if (is_array($baselineEntry)) {
+            if (isset($baselineEntry["hashes"]) && is_array($baselineEntry["hashes"])) {
+                $baselineHashes = $baselineEntry["hashes"];
+                $baselineSkDate = trim((string)($baselineEntry["last_sk_date"] ?? ""));
+            } else {
+                // backward compatibility for old tracker data format
+                $baselineHashes = $baselineEntry;
+            }
+        }
+
+        if (!empty($baselineHashes)) {
+            $baselineSet = array_flip($baselineHashes);
+        }
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $hash = aiagentNsfwHashJournalRow($row);
+            if (isset($baselineSet[$hash])) {
+                continue;
+            }
+
+            $speaker = trim((string)($row["speaker"] ?? ""));
+            $listener = trim((string)($row["listener"] ?? ""));
+            $skDate = trim((string)($row["sk_date"] ?? ""));
+            $speech = trim((string)($row["speech"] ?? ""));
+            if ($speaker === "" || $speech === "") {
+                continue;
+            }
+
+            if (!isset($allowedSpeaker[$speaker])) {
+                continue;
+            }
+
+            if ($listener !== "" && !isset($allowedSpeaker[$listener])) {
+                continue;
+            }
+
+            if (!aiagentNsfwIsAfterSkDate($skDate, $baselineSkDate)) {
+                continue;
+            }
+
+            $lines[] = [
+                "sk_date" => $skDate,
+                "speaker" => $speaker,
+                "listener" => $listener,
+                "speech" => preg_replace('/\s+/', ' ', $speech),
+                "seq" => $seq++,
+                "hash" => $hash,
+            ];
+        }
+    }
+
+    $unique = [];
+    $deduped = [];
+    foreach ($lines as $line) {
+        if (isset($unique[$line["hash"]])) {
+            continue;
+        }
+        $unique[$line["hash"]] = true;
+        $deduped[] = $line;
+    }
+
+    usort($deduped, function ($a, $b) {
+        $aDate = $a["sk_date"];
+        $bDate = $b["sk_date"];
+        if ($aDate === $bDate) {
+            return $a["seq"] <=> $b["seq"];
+        }
+        if ($aDate === "") {
+            return 1;
+        }
+        if ($bDate === "") {
+            return -1;
+        }
+        return strcmp($aDate, $bDate);
+    });
+
+    return $deduped;
+}
+
+function aiagentNsfwTrackPlayerSceneStage($stageId, $sceneDescription, $hasCustomDescription, array $sexTags, array $orderedActorList, $gameTs)
+{
+    $player = trim((string)($GLOBALS["PLAYER_NAME"] ?? ""));
+    $actors = aiagentNsfwUniqueNames($orderedActorList);
+    if ($player === "" || empty($actors)) {
+        return;
+    }
+
+    $playerMatchedName = null;
+    foreach ($actors as $actorName) {
+        if (aiagentNsfwNameLooksLikePlayer($actorName, $player)) {
+            $playerMatchedName = $actorName;
+            break;
+        }
+    }
+
+    if ($playerMatchedName === null) {
+        return;
+    }
+
+    $state = aiagentNsfwLoadSceneTracker();
+    if (empty($state["active"])) {
+        $participants = array_values(array_filter($actors, function ($name) use ($playerMatchedName) {
+            return $name !== $playerMatchedName;
+        }));
+
+        $state = aiagentNsfwSceneTrackerDefault();
+        $state["active"] = true;
+        $state["session_id"] = uniqid("ostim_", true);
+        $state["started_gamets"] = (string)$gameTs;
+        $state["started_unix"] = time();
+        $state["player_name"] = $playerMatchedName;
+        $state["actors"] = array_merge([$playerMatchedName], $participants);
+        $state["participants"] = $participants;
+        $state["journal_window"] = 1200;
+        $state["journal_baseline"] = aiagentNsfwCaptureSpeechBaseline($state["actors"], $state["journal_window"]);
+        $floorSkDate = "";
+        foreach ($state["journal_baseline"] as $entry) {
+            if (is_array($entry)) {
+                $entrySkDate = trim((string)($entry["last_sk_date"] ?? ""));
+                if ($entrySkDate !== "" && aiagentNsfwCompareSkDate($entrySkDate, $floorSkDate) > 0) {
+                    $floorSkDate = $entrySkDate;
+                }
+            }
+        }
+        $state["journal_floor_sk_date"] = $floorSkDate;
+
+        $startEvent = $GLOBALS["gameRequest"];
+        $startEvent[0] = "ext_nsfw_scene_start";
+        $startEvent[3] = "# PLAYER OSTIM SCENE STARTED: participants=" . implode(", ", $participants);
+        logEvent($startEvent);
+    } else {
+        $mergedActors = aiagentNsfwUniqueNames(array_merge($state["actors"] ?? [], $actors));
+        $state["actors"] = $mergedActors;
+        $state["participants"] = array_values(array_filter($mergedActors, function ($name) use ($playerMatchedName) {
+            return $name !== $playerMatchedName;
+        }));
+    }
+
+    $newStage = [
+        "stage" => (string)$stageId,
+        "description" => trim((string)$sceneDescription),
+        "has_db_description" => (bool)$hasCustomDescription,
+        "tags" => array_values($sexTags),
+        "actors" => $actors,
+        "gamets" => (string)$gameTs,
+    ];
+
+    $history = $state["stage_history"] ?? [];
+    $last = end($history);
+    if (!is_array($last) || (($last["stage"] ?? "") !== $newStage["stage"])) {
+        $history[] = $newStage;
+        $state["stage_history"] = $history;
+    }
+
+    aiagentNsfwSaveSceneTracker($state);
+}
+
+function aiagentNsfwHandlePlayerSceneEnd(array $endedActors, $gameTs)
+{
+    $state = aiagentNsfwLoadSceneTracker();
+    if (empty($state["active"])) {
+        return;
+    }
+
+    $player = trim((string)($state["player_name"] ?? ($GLOBALS["PLAYER_NAME"] ?? "")));
+    $endedActors = aiagentNsfwUniqueNames($endedActors);
+    $knownActors = aiagentNsfwUniqueNames($state["actors"] ?? []);
+    if (!in_array($player, $knownActors, true)) {
+        $knownActors[] = $player;
+    }
+
+    $participants = aiagentNsfwUniqueNames(array_values(array_filter(array_merge($state["participants"] ?? [], $endedActors), function ($name) use ($player) {
+        return $name !== $player;
+    })));
+
+    $actorsForDialogue = aiagentNsfwUniqueNames(array_merge([$player], $participants));
+    $historyWindow = (int)($state["journal_window"] ?? 1200);
+    if ($historyWindow < 200) {
+        $historyWindow = 200;
+    }
+    $baseline = $state["journal_baseline"] ?? [];
+    $floorSkDate = trim((string)($state["journal_floor_sk_date"] ?? ""));
+    if ($floorSkDate !== "") {
+        foreach ($actorsForDialogue as $actorName) {
+            if (!isset($baseline[$actorName]) || !is_array($baseline[$actorName])) {
+                $baseline[$actorName] = ["hashes" => [], "last_sk_date" => $floorSkDate];
+                continue;
+            }
+            if (!isset($baseline[$actorName]["hashes"])) {
+                $baseline[$actorName] = ["hashes" => $baseline[$actorName], "last_sk_date" => $floorSkDate];
+                continue;
+            }
+            if (empty($baseline[$actorName]["last_sk_date"])) {
+                $baseline[$actorName]["last_sk_date"] = $floorSkDate;
+            }
+        }
+    }
+
+    $dialogue = aiagentNsfwCollectSceneDialogue($actorsForDialogue, $baseline, $historyWindow);
+    $stages = $state["stage_history"] ?? [];
+
+    $report = [];
+    $report[] = "# PLAYER OSTIM SCENE END";
+    $report[] = "session_id=" . ($state["session_id"] ?? "unknown");
+    $report[] = "participants_excluding_player=" . (empty($participants) ? "(none)" : implode(", ", $participants));
+    $report[] = "";
+    $report[] = "## Stage progression";
+    if (empty($stages)) {
+        $report[] = "(no stage data captured)";
+    } else {
+        $idx = 1;
+        foreach ($stages as $stageItem) {
+            $stage = trim((string)($stageItem["stage"] ?? ""));
+            $desc = trim((string)($stageItem["description"] ?? ""));
+            $hasDbDesc = !empty($stageItem["has_db_description"]);
+            $line = $idx . ". " . ($stage !== "" ? $stage : "(unknown stage)");
+            if ($desc !== "") {
+                $line .= " | " . ($hasDbDesc ? "db_desc=" : "fallback_desc=") . $desc;
+            }
+            $report[] = $line;
+            $idx++;
+        }
+    }
+
+    $report[] = "";
+    $report[] = "## Dialogue timeline (player + participants)";
+    if (empty($dialogue)) {
+        $report[] = "(no incremental dialogue captured from speech journal during this scene)";
+    } else {
+        $maxLines = 120;
+        $count = 0;
+        foreach ($dialogue as $line) {
+            $speaker = $line["speaker"];
+            $listener = $line["listener"] !== "" ? (" -> " . $line["listener"]) : "";
+            $date = $line["sk_date"] !== "" ? ("[" . $line["sk_date"] . "] ") : "";
+            $speech = $line["speech"];
+            $report[] = ($count + 1) . ". " . $date . $speaker . $listener . ": " . $speech;
+            $count++;
+            if ($count >= $maxLines) {
+                $report[] = "... (truncated at {$maxLines} lines)";
+                break;
+            }
+        }
+    }
+
+    $reportText = implode("\n", $report);
+
+    $reportItem = [
+        "id" => uniqid("scene_report_", true),
+        "session_id" => ($state["session_id"] ?? "unknown"),
+        "started_gamets" => ($state["started_gamets"] ?? ""),
+        "ended_gamets" => (string)$gameTs,
+        "started_unix" => (int)($state["started_unix"] ?? 0),
+        "ended_unix" => time(),
+        "player_name" => $player,
+        "participants" => array_values($participants),
+        "participants_count" => count($participants),
+        "stage_count" => count($stages),
+        "dialogue_count" => count($dialogue),
+        "stages" => array_values($stages),
+        "dialogue" => array_values($dialogue),
+        "report_text" => $reportText,
+    ];
+
+    aiagentNsfwAppendSceneReport($reportItem);
+    aiagentNsfwSetConfValue("AIAGENT_NSFW_LAST_SCENE_REPORT", $reportText);
+
+    $endEvent = $GLOBALS["gameRequest"];
+    $endEvent[0] = "ext_nsfw_scene_end";
+    $endEvent[3] = $reportText;
+    logEvent($endEvent);
+
+    aiagentNsfwSaveSceneTracker(aiagentNsfwSceneTrackerDefault());
+}
+
 /*
 Post process info from lugin events:
 
@@ -59,6 +572,7 @@ function processInfoSexScene()
         // Fill descriptions
 
         $sceneDescription = findRowByFirstColumn(__DIR__ . "/scene_descriptions.csv", $sexStageName);
+        $hasCustomDescription = !empty($sceneDescription);
         if (! $sceneDescription) {
             $sceneDescription = "{actor0},{actor1},{actor2},{actor3},{actor4} are having an intimate moment";
         }
@@ -67,6 +581,15 @@ function processInfoSexScene()
             return $orderedActorList[$index] ?? $matches[0]; // fallback to original if key not found
         }, $sceneDescription);
         $cleanedSceneDesc = preg_replace('/\{actor\d+\}/', '', $sceneDescriptionParsed);
+
+        aiagentNsfwTrackPlayerSceneStage(
+            $sexStageName,
+            $cleanedSceneDesc,
+            $hasCustomDescription,
+            $sexTags,
+            $orderedActorList,
+            $gameRequest[2] ?? ""
+        );
 
         // Rewrite data
         $GLOBALS["gameRequest"][3]         = "#INTIMATE SCENE: $cleanedSceneDesc. Scene tags:" . implode(",", $sexTags);
@@ -81,10 +604,18 @@ function processInfoSexScene()
         $sceneResultParts = explode("/", $gameRequest[3]);
         $scoringPart      = array_slice($sceneResultParts, 1);
         $scoring          = [];
+        $sceneActors = [];
         foreach ($scoringPart as $part) {
             $actorResult = explode("@", $part);
-            $scoring[]   = $actorResult[0] . " satisfaction score: " . $actorResult[1];
-            updateIntimacyForActor($actorResult[0], ["level" => 0, "sex_disposal" => 10, "orgasmed" => false]);
+            $actorName = trim((string)($actorResult[0] ?? ""));
+            $actorScore = trim((string)($actorResult[1] ?? ""));
+            if ($actorName !== "") {
+                $sceneActors[] = $actorName;
+                updateIntimacyForActor($actorName, ["level" => 0, "sex_disposal" => 10, "orgasmed" => false]);
+            }
+            if ($actorName !== "") {
+                $scoring[] = $actorName . " satisfaction score: " . ($actorScore === "" ? "n/a" : $actorScore);
+            }
         }
         $actor = $GLOBALS["HERIKA_NAME"];
         updateIntimacyForActor($actor, ["level" => 0, "sex_disposal" => 10, "orgasmed" => false]);
@@ -93,6 +624,8 @@ function processInfoSexScene()
         $GLOBALS["PROMPTS"]["chatnf_sl_end"]["player_request"] = ["The Narrator: " . implode(",", $scoring)];
         $GLOBALS["PATCH_PROMPT_ENFORCE_ACTIONS"]               = false;
         $GLOBALS["COMMAND_PROMPT_ENFORCE_ACTIONS"]             = "";
+
+        aiagentNsfwHandlePlayerSceneEnd($sceneActors, $gameRequest[2] ?? "");
 
     } else if ($gameRequest[0] == "chatnf_sl_naked") {
         $actor                      = $GLOBALS["HERIKA_NAME"];
